@@ -30,111 +30,384 @@ Harness Engineering 回答的根本问题是：**怎么设计一套系统，让 
 
 2025 年 8 月，OpenAI 的 Codex 团队做了一个极端实验：三个人，不开 IDE，所有代码全部由 Agent 生成。从空仓库开始，到百万行级别的生产应用。
 
-他们的做法很有启发：
+**层级依赖模型。** 团队给代码库建立了一套严格的依赖规则——Types 层不能依赖 Runtime，Config 层不能依赖 Service。然后把这些规则写成 Linter，直接在 CI 里卡死。
 
-**层级依赖模型。** 团队给代码库建立了一套严格的依赖规则——Types 层不能依赖 Runtime，Config 层不能依赖 Service。然后把这些规则写成 Linter，直接在 CI 里卡死。不管你是人写的还是 AI 写的，触犯规则就合不进去。
+```python
+# 一个 Harness Linter 的简化示例
+# 检查 AI 生成的代码是否违反了层级依赖规则
+
+def check_layer_violation(code_block: str) -> list[str]:
+    """检查代码中是否存在下层反向依赖上层的情况"""
+    violations = []
+    layer_map = {
+        "types": 0, "config": 1, "repo": 2,
+        "service": 3, "runtime": 4, "ui": 5
+    }
+    
+    for line in code_block.split("\n"):
+        # 检测 import 语句
+        if line.startswith("import") or line.startswith("from"):
+            for dep in layer_map:
+                if dep in line and dep != current_layer:
+                    if layer_map[dep] < layer_map[current_layer]:
+                        violations.append(
+                            f"违规: {current_layer} 层不能依赖 {dep} 层"
+                            f"\n  {line.strip()}"
+                            f"\n  正确做法: 通过接口层间接调用或重构依赖关系"
+                        )
+    return violations
+```
 
 **"三明治"推理策略。** 他们发现全程用最高推理强度反而得分更低（53.9%），因为超时了。最终方案是：规划和验证阶段用高强度，中间写代码阶段降一档。分数飙到 63.6%。
 
-**垃圾收集日。** 每天下午 4 到 5 点，工程师不写新功能，专门审视 Agent 当天生成了什么代码——哪些是好模式、哪些是坏模式。然后把坏模式写成一条自动检查规则。技术债像高息贷款，每天还一点比集中清账轻松得多。
+```python
+# "三明治"推理预算分配示例
+class SandwichInferenceStrategy:
+    """控制 Agent 在不同阶段的推理强度"""
+    
+    def get_reasoning_level(self, phase: str) -> str:
+        strategy = {
+            "plan": "xhigh",      # 规划阶段：最高强度
+            "implement": "high",  # 编码阶段：中高强度
+            "review": "xhigh",    # 审查阶段：最高强度
+            "fix": "high",        # 修复阶段：中高强度
+        }
+        return strategy.get(phase, "high")
+    
+    def estimate_budget(self, task_size: int) -> dict:
+        """估算每个阶段的 token 预算"""
+        return {
+            "plan_budget": task_size * 0.2,    # 20% 用于规划
+            "impl_budget": task_size * 0.5,    # 50% 用于实现
+            "review_budget": task_size * 0.3,  # 30% 用于审查
+        }
+```
+
+**垃圾收集日。** 每天下午 4 到 5 点，工程师不写新功能，专门审视 Agent 当天生成的代码，把坏模式写成自动检查规则。
+
+**开源参考：** 这类 Linter 可以参考 [ESLint](https://eslint.org/) 的插件机制或 [Semgrep](https://semgrep.dev/) 的模式匹配——都是现成的 Harness 基础设施。
 
 ### 2. Anthropic — 金鱼的记忆只有七秒，Agent 的更短
 
 Anthropic 想让 Claude 从零开发一个完整的 Web 应用。跑着跑着发现一个问题：Agent 干活超过一定时间后，智商直线下降。
 
-原因是上下文窗口满了。就像你写代码写到第 1000 行时记不住第 1 行写的是什么。Agent 也是如此——越到后面越糊涂。
+原因是上下文窗口满了。Anthropic 的解决方案很颠覆：**不是压缩记忆，是直接换条新金鱼。** 这叫 Context Reset。
 
-Anthropic 的解决方案很颠覆：**不是压缩记忆，是直接换条新金鱼。**
+```python
+# Context Reset 的简化实现
+class AgentHandover:
+    """Agent 交接机制：把状态传给新 Agent"""
+    
+    def create_handover_doc(self, state: dict) -> str:
+        """生成结构化交接文档"""
+        return f"""
+# Agent 交接报告
+## 完成状态
+- 已完成: {', '.join(state['completed'])}
+- 进行中: {state['in_progress']}
+- 阻塞项: {', '.join(state['blocked'])}
+        
+## 上下文快照
+- 最新构建状态: {state['build_status']}
+- 未通过的测试: {', '.join(state['failed_tests'])}
+- 当前分支: {state['branch']}
+        
+## 下一步任务
+1. {state['next_task']['description']}
+   - 优先级: {state['next_task']['priority']}
+   - 参考文件: {state['next_task']['references']}
+   - 风险提示: {state['next_task']['risks']}
+        
+## 已知约束
+{chr(10).join(f'- {c}' for c in state['constraints'])}
+"""
+    
+    def should_reset(self, context: dict) -> bool:
+        """判断是否该触发上下文重置"""
+        total_tokens = context["input_tokens"] + context["output_tokens"]
+        return total_tokens > context["max_window"] * 0.7  # 用到 70% 就触发
+```
 
-当消息撑爆上下文窗口时，系统会清空 Agent 的记忆，启动一个全新的 Agent，只给它一份结构化的"交接文件"，告诉它项目干到哪了、下一步做什么。这叫 Context Reset（上下文重置）。
+Anthropic 还用 Git 锁文件做并发隔离——多个 Worker 不能同时改同一段代码。
 
-这比做摘要压缩更有效——Anthropic 发现哪怕压缩了历史，Agent 在超长上下文里还是会焦虑、丢失连贯性。只有彻底清空，给一张白纸，才能让它重新集中注意力。
+```python
+# 基于 Git 锁的 Agent 并发隔离（Anthropic 方案简化版）
+import os, hashlib
 
-他们还做了另一个极端的实验：让一群 Claude 并行开发一个 C 编译器。并发隔离用的是 Git 锁文件——多个 Worker 不能同时改同一段代码。想删文件、跑脚本？得先跑到"邮箱"向工头申请许可。防撞车机制保证同一件事只有一个人能干。
+class GitLockHarness:
+    """用 Git 锁文件实现 Agent 并发隔离"""
+    
+    def __init__(self, repo_path: str):
+        self.lock_dir = os.path.join(repo_path, ".git", "agent-locks")
+        os.makedirs(self.lock_dir, exist_ok=True)
+    
+    def acquire(self, file_path: str, agent_id: str) -> bool:
+        """Agent 申请修改某个文件的锁"""
+        lock_name = hashlib.md5(file_path.encode()).hexdigest()
+        lock_file = os.path.join(self.lock_dir, lock_name)
+        
+        # 用 os.open 的原子操作防止竞态
+        try:
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, 'w') as f:
+                f.write(f"agent: {agent_id}\nacquired: {__import__('time').time()}")
+            return True
+        except FileExistsError:
+            return False  # 被别人锁了
+    
+    def release(self, file_path: str):
+        lock_name = hashlib.md5(file_path.encode()).hexdigest()
+        lock_file = os.path.join(self.lock_dir, lock_name)
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
+```
 
 ### 3. LangChain — 不改模型，排名从 30 跳到 5
 
-LangChain 在 Terminal Bench 2.0 上做了一个控制变量实验：模型固定为 gpt-5.2-codex，**权重一个没动**。
+LangChain 在 Terminal Bench 2.0 上做了一个控制变量实验：模型固定为 gpt-5.2-codex，**只改 Harness**，得分从 52.8% 升到 66.5%，排名从第 30 跃升至第 5。
 
-只改了三样东西：
-1. 系统提示词里加了"规划→构建→验证→修复"的工作流
-2. Agent 启动时自动注入工作目录和环境信息，省去探索时间
-3. 加了一个循环检测中间件——同一文件被改超过阈值，就提醒"建议换个思路"
+```python
+# LangChain 式的中间件 Harness（简化版）
+from typing import Callable, Any
 
-结果：得分从 52.8% 升到 66.5%，全球排名从第 30 跃升至第 5。
+class PreCompletionChecklistMiddleware:
+    """Agent 完成任务前的强制检查清单"""
+    
+    def __init__(self, requirements: list[str]):
+        self.requirements = requirements
+    
+    def intercept(self, agent_output: str, task: str) -> bool:
+        """拦截 Agent 的输出，检查是否满足所有需求"""
+        for req in self.requirements:
+            if req not in agent_output:
+                return False  # 不满足，阻止完成
+        return True
 
-**中间件比模型权重更值钱。** 你的模型不需要更强，它只是需要更好的运行环境。
+class LoopDetectionMiddleware:
+    """循环检测：发现 Agent 在反复改同一个文件"""
+    
+    def __init__(self, max_edits: int = 3):
+        self.file_edit_count = {}
+        self.max_edits = max_edits
+    
+    def on_file_edit(self, file_path: str) -> str | None:
+        """每次编辑文件时调用，返回 None 或提示信息"""
+        self.file_edit_count[file_path] = \
+            self.file_edit_count.get(file_path, 0) + 1
+        
+        if self.file_edit_count[file_path] > self.max_edits:
+            return (
+                f"⚠️ 检测到重复编辑 ({file_path} 已修改 "
+                f"{self.file_edit_count[file_path]} 次，"
+                f"测试仍未通过)。建议回滚后重新审视需求。"
+            )
+        return None
+
+class LocalContextMiddleware:
+    """自动注入工作环境信息，帮 Agent 省探索时间"""
+    
+    def enhance_prompt(self, base_prompt: str, project_info: dict) -> str:
+        return f"""
+{base_prompt}
+
+## 工作环境（自动注入）
+- 项目路径: {project_info['root']}
+- 主要目录: {', '.join(project_info['dirs'])}
+- Python 版本: {project_info['python_version']}
+- 可用工具: {', '.join(project_info['tools'])}
+- 关键配置: {project_info.get('config_summary', '无')}
+"""
+```
+
+**开源参考：** LangChain 的中间件系统完全开源，可以直接用 `langchain.middleware` 模块。LangGraph 则是它的 Agent 编排引擎，支持状态机和条件分支。
 
 ### 4. Cursor — 20 个 Agent 一起干活，效率还不如 3 个
 
-Cursor 团队做了一个让所有人大跌眼镜的实验：让几百个 Agent 共享一个大型项目。
+Cursor 的实验发现：20 个 Agent 同时上线，有效吞吐量只相当于 2-3 个。抢不到核心代码的 Agent 开始改注释、调空格——假装自己在工作。
 
-结果呢？20 个 Agent 同时上线，有效吞吐量只相当于 2-3 个 Agent。锁机制变成了瓶颈，大家互相等着。更搞笑的是，抢不到核心代码的 Agent 为了表示自己还在工作，开始改注释、调空格缩进——整个代码库被疯狂"装修"。
+```python
+# "规划者-执行者"门控模式示例
+class CoordinatorAgent:
+    """主 Agent（工头）：负责任务分配和验收"""
+    
+    def assign_task(self, worker_id: str, task: dict) -> str:
+        """分配任务，返回许可令牌"""
+        token = f"permit_{worker_id}_{task['id']}_{__import__('time').time()}"
+        return token
+    
+    def approve_action(self, worker_id: str, action: dict, token: str) -> bool:
+        """Worker 执行危险操作前必须申请许可"""
+        if not token or worker_id not in token:
+            return False
+        return True
 
-他们的解决方案是**"规划者-执行者"门控模式**：一个主 Agent 当工头，派出多个干活的小弟。小弟要做危险操作，得通过"邮箱"向工头申请许可。同一张许可单不能两个人抢。
+class WorkerAgent:
+    """执行 Agent（小弟）：只能干活，要许可才能干危险事"""
+    
+    def __init__(self, coordinator: CoordinatorAgent, worker_id: str):
+        self.coordinator = coordinator
+        self.worker_id = worker_id
+        self.current_token = None
+    
+    def request_permission(self, action: dict, task: dict):
+        self.current_token = self.coordinator.assign_task(
+            self.worker_id, task
+        )
+```
 
 ### 5. 海致科技 — 当 Harness 遇上 B 端
 
-国内的情况更复杂。海致科技在做金融、政务领域的 Harness 落地时发现了一个"生产悬崖"——实验室里跑得挺顺的 Agent，一进企业环境就抓瞎。
+国内的情况更复杂。B 端企业的 IT 环境是几十年的"技术债博物馆"：ERP、CRM、OA、财务系统、自研中台……跨系统对接占总项目 60% 以上。
 
-原因是 B 端企业的 IT 环境是几十年的"技术债博物馆"：ERP、CRM、OA、财务系统、自研中台……跨系统对接的工作量占总项目 60% 以上。模型本身不会调 SAP 接口，不会读 Oracle 视图，不会走企业的审批流。
-
-海致的解法分三层：
-- **知识层**：用企业知识图谱 + 动态检索，把 15%+ 的领域幻觉率降下来
-- **编排层**：把 ERP、CRM 这些老系统封装成 Agent 能调用的标准化工具
-- **安全层**：每一步决策都可追溯、可审计
-
-**国内做 Harness Engineering，最难的不是 AI，是跟老系统打交道。**
+海致的解法分三层：知识层（企业知识图谱 + 动态检索降幻觉）、编排层（异构系统封装为标准化工具）、安全层（全程可追溯可审计）。
 
 ---
 
-## 具体怎么接入？手把手教你搭缰绳
-
-很多团队问："我听懂了 Harness 很重要，但我明天上班该干嘛？"
-
-别想太复杂。Harness Engineering 不是"一把梭"，是渐进式的。你可以按这个节奏来：
+## 具体怎么搭缰绳？三步走，带代码
 
 ### 第一步：把文档从"百科全书"变成"地图"（1-2 天）
 
-先看看你的 AGENTS.md 或者 README。是不是很长很全，但 Agent 根本不看？
+选一个 Agent 最近翻车的场景，从它的报错日志反推——它缺哪份文档？
 
-**正确做法：** 把大文档拆成小块，每份头部写好元信息——适用范围、最后更新时间、关联哪些模块。然后告诉 Agent："别一口气全读，用到什么查什么。"
-
-就像不把整本百科全书塞给一个人，而是告诉他图书馆每层放什么书、怎么查索引。
-
-**验收标准：** Agent 两次检索之内能找到对的文档。
+```python
+# 自动化文档索引生成（让 Agent 按需检索）
+DOCS_INDEX = {
+    "架构规范": {
+        "path": "docs/architecture.md",
+        "updated": "2026-05-15",
+        "tags": ["依赖规则", "分层", "模块边界"],
+        "when_to_read": "新增模块或修改核心依赖关系时",
+    },
+    "API 规范": {
+        "path": "docs/api-standards.md", 
+        "updated": "2026-05-10",
+        "tags": ["REST", "命名", "错误码"],
+        "when_to_read": "新建或修改 API 接口时",
+    },
+    "数据库规范": {
+        "path": "docs/db-standards.md",
+        "updated": "2026-05-01",
+        "tags": ["表结构", "索引", "迁移"],
+        "when_to_read": "修改数据库 schema 时",
+    },
+}
+```
 
 ### 第二步：把"不准 XXX"变成硬规矩（3-5 天）
 
-口头约定对 Agent 无效。你写了"严禁直接修改数据库"，Agent 看了眼，然后照改不误。
+口头约定对 Agent 无效。选三到五条规则，写成硬性检查：
 
-选你们团队最头疼的三到五条规则，写成 Linter 或 CI Hook，**违规直接阻断**。有一个关键细节：报错信息不只是说"你违规了"，还要说"为什么违规、正确做法是什么"。这样 Agent 读到错误能自己改，不需要人介入。
+```python
+# 自定义 Linter 规则（Harness 的核心）
+# 可以在 CI 里用 ESLint/Semgrep 或自定义脚本跑
 
-**验收标准：** 违规代码根本上不了线，而且 Agent 自己能修正。
+def harness_check(code: str, file_path: str) -> list[dict]:
+    """Harness 检查器：返回所有违规项"""
+    violations = []
+    
+    # 规则1: 不允许 magic number
+    if re.search(r'(?<!= )\d{4,}(?![.\d])', code) and "config" not in file_path:
+        violations.append({
+            "rule": "no-magic-numbers",
+            "severity": "error",
+            "message": "发现魔法数字，请提取为配置常量",
+            "fix_hint": "将数字抽取到 config.py 或常量文件",
+        })
+    
+    # 规则2: 不允许直接 print
+    if "print(" in code and "test" not in file_path:
+        violations.append({
+            "rule": "no-print", 
+            "severity": "warning",
+            "message": "生产代码不要用 print，请用 logger",
+            "fix_hint": "将 print() 替换为 logging.info()",
+        })
+    
+    # 规则3: 函数不能超过 50 行
+    for func_match in re.finditer(r'def \w+\(.*\):.*?(?=\ndef |\Z)', code, re.DOTALL):
+        lines = func_match.group().count('\n')
+        if lines > 50:
+            violations.append({
+                "rule": "max-function-length",
+                "severity": "error",
+                "message": f"函数超过 50 行（当前 {lines} 行），请拆分",
+                "fix_hint": "按单一职责原则拆分为多个小函数",
+            })
+    
+    return violations
+```
+
+关键细节：报错信息要包含"为什么违规 + 怎么改"，这样 Agent 能自己修，不需要人介入。
 
 ### 第三步：让系统自己"长记性"（1-2 周）
 
-这步最关键也最容易被忽略——不是搭完就完了。
+建立父-子 Agent 架构，每翻一次车就加固一道：
 
-建立一套父-子 Agent 架构：主 Agent 当项目经理，干活小弟们分头执行，干完找主 Agent 验收。
+```python
+class HarnessSystem:
+    """完整的 Harness 系统：自动记录错误并加固"""
+    
+    def __init__(self):
+        self.error_log = []
+        self.rules = []
+    
+    def record_failure(self, agent_id: str, task: str, error: str):
+        """Agent 翻车时记录"""
+        entry = {
+            "agent": agent_id,
+            "task": task,
+            "error": error,
+            "time": __import__('time').time(),
+            "fixed": False,
+        }
+        self.error_log.append(entry)
+        
+        # 如果同一个错误出现两次，自动生成规则
+        similar = [e for e in self.error_log 
+                   if e["error"] == error and e["agent"] != agent_id]
+        if len(similar) >= 1:
+            self._auto_generate_rule(error)
+    
+    def _auto_generate_rule(self, error: str):
+        """从错误中自动生成 Harness 规则"""
+        rule = {
+            "type": "linter" if "code" in error else "checklist",
+            "pattern": error,
+            "created": __import__('time').time(),
+            "enabled": True,
+        }
+        self.rules.append(rule)
+        print(f"🛡️ 自动生成规则 #{len(self.rules)}: {error[:50]}...")
+```
 
-每天固定跑一遍"技术债扫描"（OpenAI 叫垃圾收集日）：识别今天 Agent 引入的新坏模式，然后写成一条自动检查规则。
+---
 
-**每翻一次车，就往缰绳上加一道扣。** 第一次犯错是 Agent 的问题，第二次还犯同样的问题，就是你的 Harness 没搭好。
+## 开源框架推荐
+
+光看理论还不够，下面这些开源项目可以直接拿来做你的 Harness 基础设施：
+
+| 框架 | 用途 | GitHub |
+|------|------|--------|
+| **LangChain / LangGraph** | Agent 编排 + 状态机 + 中间件 | github.com/langchain-ai/langchain |
+| **OpenAI Agents SDK** | Function Calling + Tool 定义 | github.com/openai/openai-agents-python |
+| **Semgrep** | 代码模式匹配 Linter | github.com/semgrep/semgrep |
+| **MCP (Model Context Protocol)** | Agent 接入外部工具的标准协议 | github.com/modelcontextprotocol |
+| **Dify** | 低代码 AI 应用平台 | github.com/langgenius/dify |
+| **vLLM** | 推理加速（量化 / PagedAttention） | github.com/vllm-project/vllm |
+| **RAGAS** | RAG 系统评估框架 | github.com/explodinggradients/ragas |
+
+这些项目都是开源的，可以直接 fork 下来看源码，很多 Harness 思想都植根其中。
 
 ---
 
 ## 最后说两句人话
 
-ThoughtWorks 技术专家 Birgitta Böckeler 有句话最近被反复引用：
-
-> "为了获得更高的 AI 自主性，运行时必须受到更严格的约束。增加信任需要的不是更多自由，而是更多限制。"
+> "为了获得更高的 AI 自主性，运行时必须受到更严格的约束。增加信任需要的不是更多自由，而是更多限制。"  
+> — Birgitta Böckeler, ThoughtWorks
 
 想想高速路的护栏——正因为有它们，你才敢开到 120。
 
 2026 年的工程师正在经历一次角色转移：以前你问"怎么写出更好的代码"，现在你问"怎么设计一个让 Agent 稳定干活的环境"。
-
-这一课在模型能力快速趋同的当下特别值钱——GPT、Claude、Grok 的差距会越来越小。但在同一个模型下，你设计的文档结构、Lint 规则、Hook 脚本、Agent 分工——**才是真正拉开生产力差距的地方。**
 
 明天上班做什么？选一个 Agent 最近翻车的场景，写一条规则堵上。今天就干。
 
